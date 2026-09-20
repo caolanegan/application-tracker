@@ -8,6 +8,12 @@ data/exports/*
 !data/inbox/.gitkeep
 !data/exports/.gitkeep
 
+# Master CV and rendered variants — personal data (SPEC D16)
+cv/*
+!cv/master.example.yaml
+data/cv/*
+!data/cv/.gitkeep
+
 # Python
 __pycache__/
 *.py[cod]

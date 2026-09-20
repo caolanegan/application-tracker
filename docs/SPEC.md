@@ -36,15 +36,21 @@ laptop.
 - A localhost web page that reads that store and writes application status,
   interview events and notes back to it.
 - CSV and Excel export.
+- Capturing the full text of a saved job's description, so it can be tailored against.
+- Generating a CV tailored to each individual role, from one master CV, and rendering
+  it to `.docx` and PDF for download from the dashboard.
+- A salary figure for every job: taken from the posting where LinkedIn publishes one,
+  and otherwise estimated from market sources with its provenance recorded.
 
 ### Out of scope (v1)
 
 - Auto-applying to jobs, or any write action against LinkedIn/Glassdoor.
 - Job boards other than LinkedIn (Indeed, Otta, direct careers pages).
-- Scraping full job descriptions or Glassdoor review text. We take the numbers and
-  a short snippet only.
+- Glassdoor review *text*. We take the numbers only.
+- Cover letters. (The CV pipeline is built so this is a small addition later.)
+- Currency conversion between salaries (see D19).
 - Multi-user, auth, hosting, mobile.
-- Salary estimation, résumé tailoring, notifications/reminders by email.
+- Notifications/reminders by email.
 
 ### Explicitly deferred (v2 candidates, do not build now)
 
@@ -285,12 +291,112 @@ hand; it repoints jobs and ratings and writes an alias row.
 
 - `v_latest_glassdoor` — one row per company, the most recent `glassdoor_ratings`
   row by `captured_at` (ties broken by `id`).
+- `v_latest_salary` — one row per job: the most recent `salary_estimates` row with
+  `basis = 'posting'` if any exists, otherwise the most recent `estimated` one. A
+  figure the employer published always outranks one we derived, however recent
+  (SPEC D18).
 - `v_dashboard` — the denormalized row the UI and exports both consume: job fields
   + company name + latest Glassdoor columns + application status/dates/notes +
-  `next_event_at`, `next_event_title`, `open_event_count`.
+  `next_event_at`, `next_event_title`, `open_event_count` + `glassdoor_url` and
+  `job_url` (the UI links out to both) + the `v_latest_salary` columns + `cv_version`,
+  `cv_status`, `cv_rendered_at` from the newest `cv_variants` row +
+  `has_job_description`.
 
 Both the web API and the exporter read `v_dashboard`. There must not be two
 different definitions of "the dashboard row".
+
+### 5.10 `job_descriptions`
+
+The full posting text. One row per job; re-capture replaces it. Needed because a CV
+cannot be tailored to a role without the role's own words.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | |
+| `job_id` | INTEGER NOT NULL UNIQUE FK → jobs(id) ON DELETE CASCADE | |
+| `full_text` | TEXT NOT NULL | plain text, whitespace-normalized, no markup |
+| `content_hash` | TEXT NOT NULL | sha256 of `full_text`; skip the write if unchanged |
+| `source_url` | TEXT NULL | |
+| `captured_at` | TEXT NOT NULL | |
+
+### 5.11 `salary_estimates`
+
+Append-only, like Glassdoor ratings. Two kinds of row, distinguished by `basis`, and
+the distinction is never collapsed in the UI or an export (SPEC D18).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | |
+| `job_id` | INTEGER NOT NULL FK → jobs(id) ON DELETE CASCADE | |
+| `basis` | TEXT NOT NULL | `posting` = LinkedIn published it. `estimated` = derived from market sources. |
+| `currency` | TEXT NOT NULL | ISO 4217, e.g. `EUR`, `GBP`, `USD` |
+| `period` | TEXT NOT NULL | `year` \| `month` \| `day` \| `hour` |
+| `min_amount` | REAL NULL | |
+| `max_amount` | REAL NULL | at least one of min/max required |
+| `annualized_min` / `annualized_max` | REAL NULL | derived, see below |
+| `confidence` | TEXT NOT NULL | `high` \| `medium` \| `low`. Always `high` for `posting`. |
+| `sources_json` | TEXT NULL | JSON array of `{name, url, note}`; **required and non-empty when `basis = 'estimated'`** |
+| `method_notes` | TEXT NULL | how the estimate was reached, in a sentence |
+| `captured_at` | TEXT NOT NULL | |
+
+Annualization is fixed and deterministic so sorting is stable: `year` ×1,
+`month` ×12, `day` ×220, `hour` ×1800. These multipliers live in one constant.
+
+### 5.12 `cv_variants`
+
+One row per (job, version). Versions are immutable once rendered — re-tailoring
+produces v2, it never edits v1 (SPEC D15).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | |
+| `job_id` | INTEGER NOT NULL FK → jobs(id) ON DELETE CASCADE | |
+| `version` | INTEGER NOT NULL | 1-based; `UNIQUE(job_id, version)` |
+| `status` | TEXT NOT NULL | `draft` \| `rendered` \| `sent` |
+| `master_hash` | TEXT NOT NULL | sha256 of `cv/master.yaml` at tailoring time — so a variant built against a stale master is detectable |
+| `content_json` | TEXT NOT NULL | the §6.7 variant document |
+| `tailoring_notes` | TEXT NULL | why these choices were made |
+| `docx_path` | TEXT NULL | relative to repo root |
+| `pdf_path` | TEXT NULL | |
+| `rendered_at` | TEXT NULL | |
+| `created_at` | TEXT NOT NULL | |
+
+### 5.13 The master CV — `cv/master.yaml`
+
+Not a database table. A hand-editable file, the single source of every factual claim
+about me, gitignored (it has my phone number and address). Structure:
+
+```yaml
+contact:
+  name: Caolan Egan
+  email: caolanegan1@gmail.com
+  phone: "+353 ..."
+  location: Dublin, Ireland
+  links: { linkedin: "...", github: "..." }
+summary_pool:                 # candidates; tailoring picks/adapts ONE
+  - id: sum-platform
+    text: "Platform engineer with ..."
+    tags: [platform, infrastructure]
+experience:
+  - id: acme-2021            # stable; referenced by every variant
+    company: Acme Corp
+    title: Senior Platform Engineer
+    start: "2021-03"
+    end: null                # null = present
+    location: Dublin
+    bullets:
+      - id: acme-2021-b1     # stable; the unit of traceability (D14)
+        text: "Cut deploy time from 40 minutes to 6 by ..."
+        tags: [ci, kubernetes, performance]
+skills:
+  - { id: sk-k8s, name: Kubernetes, group: Infrastructure, level: advanced }
+education:
+  - { id: edu-ucd, institution: "...", qualification: "...", year: "2018" }
+certifications: []
+```
+
+Every `id` is stable and unique within the file. Tailored variants reference these
+ids; a variant that references an id the master does not contain fails validation.
 
 ---
 
@@ -398,6 +504,114 @@ different definitions of "the dashboard row".
 what to go and fetch — it is the handshake that stops us re-fetching a company
 every session.
 
+### 6.5 Job descriptions → `data/inbox/jd-YYYYMMDD-HHMM.json`
+
+```json
+{
+  "schema_version": 1,
+  "source": "job_descriptions",
+  "captured_at": "2026-09-20T22:40:00Z",
+  "descriptions": [
+    {
+      "linkedin_job_id": "4012345678",
+      "source_url": "https://www.linkedin.com/jobs/view/4012345678/",
+      "full_text": "About the role\n\nWe are looking for ...",
+      "salary_text": "€75,000 - €95,000 per year"
+    }
+  ]
+}
+```
+
+`full_text` is plain text with runs of whitespace collapsed and no markup. A record
+whose `linkedin_job_id` is not already in `jobs` is an error, not an insert — job
+descriptions attach to saved jobs, they do not create them. `salary_text`, when the
+posting states one, is written through to `jobs.salary_text` and is what the `posting`
+salary row is parsed from.
+
+### 6.6 Salary → `data/inbox/salary-YYYYMMDD-HHMM.json`
+
+```json
+{
+  "schema_version": 1,
+  "source": "salary_estimates",
+  "captured_at": "2026-09-20T22:55:00Z",
+  "estimates": [
+    {
+      "linkedin_job_id": "4012345678",
+      "basis": "estimated",
+      "currency": "EUR",
+      "period": "year",
+      "min_amount": 75000,
+      "max_amount": 95000,
+      "confidence": "medium",
+      "method_notes": "Median of three sources for senior platform roles in Dublin, adjusted down for a 200-person company.",
+      "sources": [
+        { "name": "Levels.fyi", "url": "https://...", "note": "P50 €88k for L5 Dublin" },
+        { "name": "IrishJobs salary guide 2026", "url": "https://...", "note": "€72–92k" }
+      ]
+    }
+  ]
+}
+```
+
+Validation, per record:
+- `basis = 'estimated'` with an empty or absent `sources` array is a **hard error**.
+  An estimate without provenance is a guess wearing a number's clothes, and six weeks
+  later I will not remember which it was.
+- At least one of `min_amount` / `max_amount` must be present, non-negative, and
+  `min <= max`.
+- `currency` must be three uppercase letters; `period` must be one of the four values
+  in §5.11.
+- `basis = 'posting'` records are normally produced by parsing `jobs.salary_text`
+  locally rather than captured — but the contract accepts them either way.
+
+### 6.7 Tailored CV variant → `data/inbox/cv-<job_id>-v<N>.json`
+
+```json
+{
+  "schema_version": 1,
+  "source": "cv_variant",
+  "job_id": 12,
+  "created_at": "2026-09-20T23:10:00Z",
+  "master_hash": "sha256:abc123...",
+  "headline": "Senior Platform Engineer",
+  "summary": { "master_id": "sum-platform", "text": "Platform engineer with ..." },
+  "experience": [
+    {
+      "master_id": "acme-2021",
+      "bullets": [
+        { "master_bullet_id": "acme-2021-b1", "text": "Cut deploy time from 40 minutes to 6 by ..." }
+      ]
+    }
+  ],
+  "skills_order": ["sk-k8s", "sk-terraform"],
+  "education_ids": ["edu-ucd"],
+  "tailoring_notes": "Led on the Kubernetes and CI work; dropped the frontend bullets.",
+  "coverage": {
+    "jd_keywords_matched": ["kubernetes", "terraform", "ci/cd"],
+    "jd_keywords_unmatched": ["golang", "fintech domain"]
+  }
+}
+```
+
+Validation, and this is the part that matters (SPEC D14):
+- Every `master_id`, `master_bullet_id`, skill id and education id **must exist** in
+  `cv/master.yaml`. Unknown id → hard error.
+- Every numeric token in a bullet's `text` must also appear in the master bullet it
+  cites. A rephrase may drop "40 minutes"; it may not introduce "£2M" or "12 engineers".
+- `company`, `title`, `start` and `end` are **not** present in the variant at all —
+  they are copied from the master at render time, so they are structurally unfabricable.
+- `master_hash` mismatching the current `cv/master.yaml` is a **warning**, not an
+  error: it is stored and surfaced so I know the variant predates a master edit.
+
+### 6.8 Tailoring brief → stdout of `tracker cv brief <job_id>`
+
+The package a tailoring session needs, in one place: the job (title, company,
+location), the full JD text, the whole master CV, any existing variants for this job,
+and a naive keyword diff between the JD and the master's bullet tags. It is an input
+to judgement, not an answer — the keyword diff is a prompt to think, and nothing in
+the system treats it as authoritative.
+
 ### 6.4 HTTP API (localhost only)
 
 All responses JSON. All mutations return the updated resource.
@@ -414,6 +628,11 @@ All responses JSON. All mutations return the updated resource.
 | DELETE | `/api/events/{id}` | delete event |
 | GET | `/api/stats` | counts by status, pending-interview count, needs-attention count |
 | POST | `/api/export` | body `{"format": "csv"|"xlsx"}` → writes to `data/exports/`, returns path |
+| GET | `/api/jobs/{job_id}/cv` | list of variants (version, status, rendered_at, paths, stale-master flag) |
+| GET | `/api/jobs/{job_id}/cv/{version}/download?format=docx\|pdf` | streams the file with `Content-Disposition: attachment` |
+| POST | `/api/jobs/{job_id}/cv/{version}/render` | renders docx + pdf, returns the updated variant |
+| GET | `/api/jobs/{job_id}/description` | the stored JD text, or 404 |
+| GET | `/api/jobs/{job_id}/salary` | the salary row plus its sources, or 404 |
 
 Errors: `{"error": "human readable", "field": "optional"}` with 400/404/500.
 
@@ -438,6 +657,16 @@ tracker companies list
 tracker companies merge <keep_id> <drop_id>
 tracker status <job_id> <status> [--applied-on DATE] [--note TEXT]
 tracker event add <job_id> --type T --at DATETIME [--title T] [--notes N]
+tracker ingest descriptions <file.json>    store full JD text
+tracker ingest salary <file.json>          store posted/estimated salary
+tracker salary parse-postings               parse jobs.salary_text → 'posting' rows
+tracker salary pending                      jobs with no salary figure, for estimation
+tracker cv import-master <file.docx>       one-time: .docx → cv/master.yaml
+tracker cv validate-master                 check ids unique, schema valid
+tracker cv brief <job_id> [--out PATH]     emit the §6.8 tailoring brief
+tracker cv ingest <file.json>              store a tailored variant (§6.7)
+tracker cv render <job_id> [--version N] [--formats docx,pdf]
+tracker cv list [<job_id>]
 tracker export csv [--out PATH]
 tracker export xlsx [--out PATH]
 tracker serve [--port 8765] [--no-open]
@@ -480,10 +709,13 @@ on it. Cost: hand-rolled routing and JSON handling, no automatic OpenAPI docs, n
 free request validation — so §9's validation tests matter more. Revisit if the
 endpoint count passes ~25.
 
-**D4 — One optional dependency: `openpyxl`, for xlsx export only.**
-CSV export is stdlib and always works. `tracker export xlsx` fails with a clear
-"pip install openpyxl" message if it is absent. Nothing else in the system may
-import it.
+**D4 — Optional dependencies, each scoped to one subsystem (amended by D17).**
+CSV export is stdlib and always works. `openpyxl` is imported only by the xlsx
+exporter; `python-docx` and `PyYAML` only by the CV subsystem. Each import happens
+inside the function that needs it, and a missing one produces a clear
+"pip install X" message rather than a traceback. `tracker init`, ingest, the queries
+layer, the server and CSV export must all work with **zero** third-party packages
+installed.
 
 **D5 — Glassdoor ratings are append-only history, not an updated row.**
 Costs a view (`v_latest_glassdoor`) but means I can see a company's rating move, and
@@ -511,10 +743,76 @@ re-running it.
 
 ---
 
+**D11 — CV tailoring is done by Claude in-session, not by code calling an LLM API.**
+Alternatives: an `--all` command hitting the Anthropic API unattended; a purely
+deterministic keyword-reorderer. The API route would put a billable key on disk and
+punch the first hole in D1's network-free rule, for a task I do a handful of times a
+week and want to read before sending. The deterministic route can only select and
+reorder, never rephrase, which is most of the value. So: `tracker cv brief` emits
+everything needed to tailor, I write the variant, `tracker cv ingest` stores it. The
+code owns structure, validation and rendering; the judgement stays in the session.
+Consequence: no batch tailoring. Accepted.
+
+**D12 — The master CV is a structured YAML file, converted once from the existing
+.docx.** `tracker cv import-master` does a best-effort extraction that I then correct
+by hand, once. After that the .docx is irrelevant and `cv/master.yaml` is the source
+of every factual claim. Rejected: re-parsing a .docx on every render — heading and
+bullet detection on real-world CVs is unreliable, and it would make every render
+non-deterministic.
+
+**D13 — `.docx` is rendered first; the PDF is converted from it via headless
+LibreOffice.** Alternatives: HTML→PDF via WeasyPrint, or ReportLab direct. Both mean
+the .docx and the PDF come from different code paths and drift visually — the version
+a recruiter opens would not be the one I proofread. `soffice --headless --convert-to
+pdf` guarantees parity. Cost: LibreOffice must be installed; `tracker cv render
+--formats docx` still works without it, with a clear message.
+
+**D14 — Tailoring may re-emphasise, but never fabricate. This is enforced
+structurally, not by good intentions.**
+Every bullet in a variant carries the `master_bullet_id` it derives from, and
+validation rejects the variant if that id is not in the master. On top of that, every
+numeric token (years, percentages, money, team sizes, durations) in a tailored bullet
+must also appear in its source master bullet — a rephrase may drop a metric but may
+not introduce one. Employer names, job titles and dates are not in the variant format
+at all; they are copied from the master at render time, so they are structurally
+unfabricable. Gaps between what the role wants and what I have are reported in
+`coverage.jd_keywords_unmatched`, not papered over. A CV is a factual claim made to a
+real employer; the cost of a plausible invention surviving into a PDF is mine to pay
+at interview, so the system is built so it cannot happen quietly.
+
+**D15 — Variants are versioned and immutable once rendered.** Re-tailoring against an
+updated master or a changed JD creates v2. I need to know exactly which document I
+sent to which employer, months later, when they ring me about it.
+
+**D16 — Rendered CVs live at `data/cv/<company-slug>-<job-id>-v<N>.docx|pdf` and are
+gitignored,** alongside `cv/master.yaml`. Filenames are predictable enough to attach
+from a mail client's file dialog without opening the tracker.
+
+**D17 — A stated salary and an estimated one are different claims and are never
+merged.** Every salary row carries `basis`; `v_latest_salary` prefers `posting` over
+`estimated` regardless of recency; the UI labels estimates explicitly and shows the
+sources on hover; exports carry `Salary Basis` and `Salary Confidence` as their own
+columns. Alternative considered and rejected: a single "salary" column with the best
+available number. That column would eventually be read as fact, and I would walk into
+a negotiation anchored on a figure Claude inferred from three blog posts.
+
+**D18 — Estimates must cite sources, enforced at ingest.** An `estimated` row with no
+`sources` array fails validation (§6.6). The estimate is Claude's judgement over
+market data found at capture time, same division of labour as D1 and D11: the session
+does the searching and the reasoning, the code stores the result and its provenance.
+
+**D19 — No currency conversion.** Salaries are stored and displayed in the currency
+posted. Sorting is by `annualized_*` within a currency, and mixed-currency sorts group
+by currency first. Converting would need a live FX rate — a network dependency, a
+staleness problem, and a number that is wrong by the time I read it.
+
+---
+
 ## 9. Quality bar
 
-- **Python 3.13, stdlib only** (plus optional `openpyxl`, D4). `pytest` for tests,
-  as a dev dependency.
+- **Python 3.13, stdlib only** for the core; `openpyxl`, `python-docx` and `PyYAML`
+  are optional, subsystem-scoped, function-level imports (D4). `pytest` as a dev
+  dependency. YAML is parsed with `yaml.safe_load` only, never `yaml.load`.
 - Type hints on every public function. `from __future__ import annotations`.
 - No network calls anywhere in `src/`. A test asserts this by grepping for
   `requests|httpx|urllib.request|playwright|selenium` in `src/`.

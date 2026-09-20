@@ -23,19 +23,24 @@ This file says *what to build in what order*; the spec says *what correct means*
 Step 1 (db + CLI skeleton)
    ├─► Step 2 (LinkedIn ingest) ──► Step 3 (Glassdoor ingest)
    │              │                        │
+   │              ├─► Step 10 (salary) ────┤
+   │              │                        │
    │              └────────┬───────────────┘
    │                       ▼
    │              Step 4 (queries + tracking CLI)
    │                       ├─► Step 5 (exports)
    │                       └─► Step 6 (HTTP API) ──► Step 7 (web UI)
-   │
-   └─► Step 8 (capture playbook)   ← can run in parallel with 2–7
-
-                                     Step 9 (E2E + README) ← last
+   │                                                      │
+   ├─► Step 11 (CV master + render) ──► Step 12 (JD + tailoring) ──► Step 13 (CV/salary/links in UI)
+   │                                                      │
+   └─► Step 8 (capture playbook)                          │
+                                                          ▼
+                                          Step 9 (E2E + README) ← genuinely last
 ```
 
-Parallelisable: {2, 8} after 1. {3, 4} order-sensitive — 4 wants 3's tables
-populated in fixtures but does not import its code. {5, 6} after 4.
+Parallelisable: {2, 8, 11} after 1. {3, 10} after 2. {5, 6} after 4. Step 9 runs
+after Step 13, not after Step 8 — it is numbered 9 for historical reasons and that is
+not worth renumbering the world over.
 
 ---
 
@@ -55,8 +60,10 @@ populated in fixtures but does not import its code. {5, 6} after 4.
 - `tests/test_schema.py`
 
 **Build**
-- `schema.sql` implementing every table, index, CHECK constraint and both views in
-  SPEC §5. Include `schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT)`.
+- `schema.sql` implementing every table, index, CHECK constraint and every view in
+  SPEC §5 — including `job_descriptions` (§5.10), `salary_estimates` (§5.11) and
+  `cv_variants` (§5.12), and the `v_latest_salary` view (§5.9). Include
+  `schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT)`.
 - `db.py`: `connect(path) -> sqlite3.Connection` that sets `foreign_keys=ON`,
   `journal_mode=WAL`, `row_factory=sqlite3.Row`; `migrate(conn)` that applies any
   unapplied migration in order and is safe to run repeatedly; a `utcnow()` helper
@@ -64,7 +71,8 @@ populated in fixtures but does not import its code. {5, 6} after 4.
   formatting its own.
 - Indexes at minimum on: `jobs(company_id)`, `jobs(is_saved)`,
   `glassdoor_ratings(company_id, captured_at)`, `applications(status)`,
-  `application_events(application_id, occurs_at)`.
+  `application_events(application_id, occurs_at)`,
+  `salary_estimates(job_id, basis, captured_at)`, `cv_variants(job_id, version)`.
 - `v_latest_glassdoor` and `v_dashboard` exactly as SPEC §5.9 describes. `v_dashboard`
   must LEFT JOIN so that a job with no Glassdoor data and no application row still
   appears, with NULLs.
@@ -79,8 +87,12 @@ populated in fixtures but does not import its code. {5, 6} after 4.
 - Test: `applications.status` CHECK rejects a bogus value.
 - Test: deleting a job cascades to its application and events.
 - Test: inserting a rating with NULL sub-ratings succeeds (SPEC D6).
-- Test: `v_dashboard` returns a row for a job that has neither ratings nor an
-  application.
+- Test: `v_dashboard` returns a row for a job that has neither ratings, salary, CV
+  nor application — with NULLs, not a missing row. This is the join that everything
+  else reads, and the easiest one to get subtly wrong.
+- Test: `v_latest_salary` returns the `posting` row for a job that has both a
+  `posting` row and a *newer* `estimated` row (SPEC D17).
+- Test: `cv_variants` `UNIQUE(job_id, version)` is enforced.
 
 **Out of scope:** any ingest, query, export or server logic.
 
@@ -264,10 +276,14 @@ populated in fixtures but does not import its code. {5, 6} after 4.
   macOS opens accented company names correctly. `csv.writer` with
   `QUOTE_MINIMAL`; embedded newlines in notes must round-trip.
 - Columns, in this order: Company, Job Title, Location, Workplace, Status, Priority,
-  Applied On, Channel, Next Action, Next Action Date, Glassdoor Overall, Reviews,
+  Applied On, Channel, Next Action, Next Action Date, Salary Min, Salary Max,
+  Currency, Period, Salary Basis, Salary Confidence, Glassdoor Overall, Reviews,
   Work/Life, Comp & Benefits, Culture, Career, Senior Mgmt, Diversity, Recommend %,
   CEO Approval %, Rating Confidence, Rating Captured, Pending Events, Next Event,
-  Next Event Date, Job URL, Glassdoor URL, Saved, Notes.
+  Next Event Date, CV Version, CV Status, Job URL, Glassdoor URL, Saved, Notes.
+- `Salary Basis` is `posting` or `estimated` and is a column of its own, never folded
+  into the number (SPEC D17). Salary amounts are written as bare numbers with no
+  currency symbol or thousands separator, so Excel treats them as numeric.
 - Empty cell for NULL — not `None`, not `0`, not `N/A`.
 - `export_xlsx(conn, out_path=None) -> Path` using `openpyxl`, imported **inside the
   function** so the module imports cleanly without it (SPEC D4). `ImportError` →
@@ -342,17 +358,31 @@ populated in fixtures but does not import its code. {5, 6} after 4.
 - (No build step, no npm, no CDN — everything local and offline-capable.)
 
 **Build**
-- A single table view of saved jobs. Columns: priority, company (with Glassdoor
-  overall as a star/number badge), job title (links to the LinkedIn posting),
-  location + workplace type, status (inline `<select>`), applied date, next action +
-  date, pending-event indicator.
+- A single table view of saved jobs. Columns: priority, company, Glassdoor overall as
+  a star/number badge, job title, salary, location + workplace type, status (inline
+  `<select>`), applied date, next action + date, pending-event indicator.
+- **Outbound links, on every row**: the job title links to the LinkedIn posting
+  (`job_url`), and the company name links to its Glassdoor page (`glassdoor_url`).
+  Both open in a new tab with `rel="noopener noreferrer"`. When `glassdoor_url` is
+  NULL the company name is plain text, not a dead link — and if the company's
+  `glassdoor_lookup_state` is `pending`, show a small "not looked up yet" marker
+  rather than nothing, so I can tell "no page exists" from "we haven't checked".
+- **Salary cell** (SPEC D17, D19): render as `€75k–95k` using the posted currency
+  symbol, never converted. A `posting` figure renders plain; an `estimated` figure
+  renders with a visible `est.` tag and a muted style, with the sources and
+  `method_notes` shown on hover/expand. The two must be distinguishable at a glance
+  and without relying on colour alone. Missing salary renders `—`, and the row
+  detail offers a "needs an estimate" hint.
 - Expandable row detail: the six Glassdoor sub-ratings as small labelled bars, the
-  event timeline, a notes textarea, and buttons to add an event.
+  salary breakdown with its sources as clickable links, the event timeline, a notes
+  textarea, and buttons to add an event. (Step 13 adds the CV panel here.)
 - Every edit `PATCH`es immediately and shows a brief saved/failed indicator. On
   failure, revert the control to its previous value and surface the error — never
   leave the UI showing a value the server rejected.
 - Toolbar: free-text search, status filter (multi), minimum Glassdoor rating, sort
   dropdown, "saved only" toggle, and an Export button hitting `POST /api/export`.
+  Sort options include salary (by `annualized_max` desc, grouping by currency per
+  SPEC D19) and an "estimates only / posted only" salary filter.
 - A stats strip across the top from `GET /api/stats`: total saved, applied, in
   process, pending interviews, needs attention. Clicking a stat applies the matching
   filter.
@@ -403,6 +433,18 @@ documentation plus two extraction snippets — it does not add runtime code.
     Cloudflare interstitial appears: **stop, report to the user, do not attempt to
     bypass it.** Record genuinely-absent companies as `not_found: true` so they leave
     the worklist.
+  - **Job descriptions**: after a LinkedIn capture, open each job with no stored
+    description, take the full posting text, and emit §6.5. Note that this is one
+    click per job and is the slowest part of the routine — do it for the jobs I
+    actually intend to apply to, not the whole list.
+  - **Salary**: run `./tracker salary parse-postings` first so anything LinkedIn
+    already stated is captured for free. Then `./tracker salary pending` gives the
+    jobs still without a figure. For those, search market sources (levels.fyi,
+    Glassdoor salaries, IrishJobs/Morgan McKinley salary guides, recent comparable
+    postings), and emit §6.6 with **at least one real source per estimate** — ingest
+    rejects an estimate with none (SPEC D18). Be honest with `confidence`: `low` is
+    the right answer for a niche role in a small company, and a `low` estimate is more
+    use to me than a confident wrong one.
   - The exact JSON envelope for each, copy-pasteable.
   - A troubleshooting section: LinkedIn changed its DOM (how to re-derive the
     selectors from the accessibility tree rather than guessing), the saved list is
@@ -459,3 +501,173 @@ documentation plus two extraction snippets — it does not add runtime code.
 - `python -m pytest tests/ -q` passes from a clean checkout.
 - Following the README quickstart on a clean machine gets to a working dashboard.
 - `scripts/seed_demo.py` + `./tracker serve` gives a UI worth screenshotting.
+
+---
+
+## Step 10 — Salary: parsing, estimation ingest, worklist
+
+**Depends on:** Step 2. **Spec sections:** §5.11, §6.6, D17, D18, D19.
+
+**Files you own**
+- `src/tracker/salary.py`
+- `src/tracker/ingest/salary.py`
+- `tests/test_salary.py`, `tests/fixtures/salary-*.json`
+- Wires `ingest salary`, `salary parse-postings`, `salary pending` into `cli.py`
+
+**Build**
+- `parse_salary_text(text: str) -> ParsedSalary | None` — a pure function over the raw
+  `jobs.salary_text` LinkedIn gives us. It must handle at least: `€75,000 - €95,000`,
+  `$120K/yr`, `£450 - £550 per day`, `€45/hour`, `Up to €90,000`, `From £60,000`,
+  `90,000 - 110,000 EUR`, and symbols both before and after the number. Return `None`
+  rather than guessing when the string is ambiguous or has no number — a wrong parse
+  is worse than no row, because it will be labelled `posting` and therefore trusted.
+- Annualization using the fixed multipliers in SPEC §5.11, in one named constant.
+- `salary parse-postings`: for every job with `salary_text` and no `posting` row,
+  parse and insert with `basis='posting'`, `confidence='high'`. Idempotent — reports
+  how many parsed, how many were unparseable (and prints those strings, so the parser
+  can be improved against real data).
+- `ingest/salary.py`: the §6.6 contract, reusing Step 2's validator. Enforce every
+  rule in §6.6, and **especially** the empty-`sources` rejection for `estimated`
+  (D18). Append-only; never update an existing row.
+- `salary pending`: JSON worklist of saved jobs with no salary row at all, ordered by
+  application priority then `last_seen_at`, including title, company, location and
+  seniority hints so the estimating session has what it needs to search with.
+
+**Acceptance**
+- Table-driven test over ≥12 real-world salary strings including the ones listed
+  above, plus three that must return `None`.
+- Test: a `day`-period row annualizes at ×220 and a `hour` row at ×1800.
+- Test: an `estimated` record with `"sources": []` is rejected, and the error message
+  says why.
+- Test: an `estimated` record with `min_amount > max_amount` is rejected.
+- Test: `v_latest_salary` prefers a 6-month-old `posting` row over a `estimated` row
+  captured today (SPEC D17).
+- Test: `parse-postings` run twice inserts nothing the second time.
+
+---
+
+## Step 11 — Master CV: import, schema, rendering to .docx and PDF
+
+**Depends on:** Step 1. Can run in parallel with Steps 2–7.
+**Spec sections:** §5.13, D12, D13, D16.
+
+**Files you own**
+- `src/tracker/cv/__init__.py`, `src/tracker/cv/master.py`, `src/tracker/cv/render.py`
+- `cv/master.example.yaml`
+- `tests/test_cv_master.py`, `tests/test_cv_render.py`
+- Wires `cv import-master`, `cv validate-master`, `cv render` into `cli.py`
+
+**Build**
+- `master.py`:
+  - `load_master(path) -> Master` — `yaml.safe_load` only (SPEC §9), then validate:
+    every id unique across the whole file, required fields present, dates parseable,
+    `end: null` meaning present. Errors name the id and the field.
+  - `master_hash(path) -> str` — sha256 of the file bytes, used by §6.7.
+  - `import_from_docx(docx_path) -> str` — best-effort .docx → YAML (D12). Detect
+    sections by heading style and bold runs, bullets by list paragraph style. Generate
+    stable ids by slugging company + year. **Emit a `# REVIEW:` comment above anything
+    it is unsure about** and print a summary of what needs checking. This runs once
+    and is expected to need hand-correction; optimise for making the corrections
+    obvious, not for being right unattended.
+- `render.py`:
+  - `render_docx(master, variant, out_path)` using `python-docx` (function-level
+    import, D4). Employer names, titles and dates come from the **master**, never the
+    variant (D14). Clean professional layout: name + contact header, summary,
+    experience with role headers and bullets, skills grouped, education. One page is
+    not enforced, but the template must not waste space.
+  - `render_pdf(docx_path, out_path)` — `subprocess.run(["soffice", "--headless",
+    "--convert-to", "pdf", ...])` with a timeout. `soffice` missing → raise
+    `MissingDependency` naming the brew install command. This is the one subprocess in
+    the codebase and it touches no network.
+  - Output paths per SPEC D16.
+- `cv/master.example.yaml`: a complete, realistic fake master CV. Used by tests and as
+  the template the user edits.
+
+**Acceptance**
+- Test: the example master loads and validates.
+- Test: a master with a duplicate bullet id fails with a message naming that id.
+- Test: `render_docx` against the example master + a fixture variant produces a file
+  that `python-docx` reads back with the expected headings and bullet count.
+- Test: the rendered docx contains the **master's** job title even when a fixture
+  variant (incorrectly) carries a different one — proving D14's structural guarantee.
+- Test: `render_pdf` raises `MissingDependency` with an actionable message when
+  `soffice` is not on PATH (monkeypatch `shutil.which`).
+- Manual check: render one CV and actually open the PDF. Report how it looks.
+
+---
+
+## Step 12 — Job descriptions, tailoring brief, variant ingest
+
+**Depends on:** Steps 2, 10, 11. **Spec sections:** §5.10, §6.5, §6.7, §6.8, D11, D14, D15.
+
+**Files you own**
+- `src/tracker/ingest/descriptions.py`
+- `src/tracker/cv/brief.py`, `src/tracker/cv/variant.py`
+- `tests/test_descriptions.py`, `tests/test_cv_variant.py`, `tests/test_cv_brief.py`
+- `tests/fixtures/jd-*.json`, `tests/fixtures/cv-variant-*.json`
+- Wires `ingest descriptions`, `cv brief`, `cv ingest`, `cv list` into `cli.py`
+- Amends `docs/CAPTURE.md` with the JD capture pass (coordinate with Step 8)
+
+**Build**
+- `ingest/descriptions.py`: §6.5. Upsert on `job_id`; skip the write when
+  `content_hash` is unchanged. A record for an unknown `linkedin_job_id` is an error,
+  not an insert. Write `salary_text` through to `jobs.salary_text` when present.
+- `cv/brief.py`: `build_brief(conn, job_id) -> dict` per §6.8. Include the job, the
+  full JD, the entire master, existing variants, and a keyword diff (JD tokens vs
+  master bullet tags + skill names, stopworded, case-folded). Fail clearly (exit 3) if
+  the job has no stored description — tailoring without the JD is the thing this whole
+  step exists to prevent.
+- `cv/variant.py`:
+  - `validate_variant(master, doc) -> list[RecordError]` implementing **every** rule
+    in §6.7. The numeric-token rule is the subtle one: extract numbers from the
+    tailored text (including `40`, `6`, `2M`, `£2m`, `12%`, `3x`) and assert each
+    appears in the source master bullet, comparing normalized forms so `2M` matches
+    `2m` and `40 minutes` matches `40`. When in doubt, **reject** — a false rejection
+    costs a rewrite, a false acceptance costs a fabricated claim on a real CV.
+  - `ingest_variant(conn, path)` — resolve the next `version` for the job, store,
+    warn on `master_hash` drift, never overwrite an existing version (D15).
+  - `list_variants(conn, job_id=None)`.
+
+**Acceptance**
+- Test: a variant citing a `master_bullet_id` that does not exist is rejected, naming
+  the id.
+- Test: a variant bullet reading "Led a team of 12" whose master bullet says "Led a
+  team of 4" is **rejected**. This test is the point of the step; write it first.
+- Test: a variant bullet that *drops* a metric present in the master is accepted.
+- Test: a variant with an employer name in it fails schema validation (the field does
+  not exist in the contract).
+- Test: ingesting a second variant for the same job creates v2 and leaves v1 byte-identical.
+- Test: `master_hash` drift produces a warning in the report, not a failure.
+- Test: `cv brief` on a job with no description exits 3 with a clear message.
+
+---
+
+## Step 13 — CV, salary and outbound links in the API and UI
+
+**Depends on:** Steps 6, 7, 10, 12. **Spec sections:** §6.4, D16, D17.
+
+**Files you own**
+- Extends `src/tracker/api.py` (CV, salary and description endpoints)
+- Extends `web/app.js`, `web/index.html`, `web/style.css`
+- `tests/test_api_cv.py`
+
+**Build**
+- The four new endpoints in SPEC §6.4. The download endpoint streams from
+  `data/cv/` with `Content-Disposition: attachment; filename="..."` and the right
+  content type, and — same rule as Step 6's static handler — resolves the path and
+  confirms it is inside `data/cv/` before opening it. A version with no rendered file
+  returns 404 with a message saying to render it first, not an empty file.
+- Row detail gains a **CV panel**: the variant list with version, created date and
+  status; `Download .docx` / `Download .pdf` buttons; a `Render` button for a `draft`
+  variant; a visible warning when `master_hash` is stale ("built against an older
+  master CV"); and, when there is no variant, a short line telling me the command to
+  run to start one (`./tracker cv brief <id>`) so the UI leads into the workflow
+  rather than dead-ending.
+- Dashboard gains a CV status indicator in the row (none / draft / rendered / sent).
+- Verify in the browser: download both formats and open them. Report what you saw.
+
+**Acceptance**
+- Test: download returns the right content type and a sensible filename.
+- Test: a path-traversal attempt on the download endpoint is refused.
+- Test: requesting a format that has not been rendered gives 404 with a useful message.
+- Test: the CV list endpoint flags stale-master variants.
