@@ -1,0 +1,21 @@
+# Data — local only, contains personal job/application history
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/inbox/*.json
+data/exports/*
+!data/inbox/.gitkeep
+!data/exports/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
