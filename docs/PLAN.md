@@ -6,16 +6,59 @@ This file says *what to build in what order*; the spec says *what correct means*
 
 ## Ground rules for every step
 
-1. Read `docs/SPEC.md` in full before writing code. Re-read the sections your step
-   names.
-2. Stay inside the "Files you own" list. If you need to change a file another step
-   owns, note it in your summary rather than rewriting it wholesale.
-3. Python 3.13, stdlib only (exception: `openpyxl` in Step 5, `pytest` for tests).
-4. No network calls to any host, ever (SPEC §3).
-5. Write the tests listed in your acceptance criteria. A step is not done until
-   `python -m pytest tests/ -q` passes for the whole repo, not just your file.
-6. End with a short summary: what you built, any spec amendments you made (SPEC §10),
-   anything you left for a later step.
+These apply to every step and are not repeated in the individual steps or in the
+agent prompt. Read them once, at the start.
+
+### Read order
+
+1. `docs/SPEC.md` in full. It is the source of truth; this file never restates it.
+2. This section.
+3. Your step below. It lists the files you own, what to build, its pitfalls and its
+   acceptance criteria — that is your complete task definition.
+4. Re-read the SPEC sections your step names, closely.
+5. Skim the other steps so you know what you are unblocking and what is not yours.
+
+### Environment
+
+- macOS. `python3` is 3.13.5, sqlite 3.50.1. Both fine as-is.
+- Tests run from a repo-root venv: `python3 -m venv .venv && .venv/bin/pip install
+  pytest` (plus `openpyxl`, `python-docx`, `PyYAML` when your step needs them).
+  `.venv/` is gitignored. Run `.venv/bin/python -m pytest tests/ -q`.
+- **The venv is for tests and optional subsystems only.** Core runtime code must run
+  under bare system `python3` with zero third-party packages (SPEC D3, D4).
+
+### Scope
+
+- Stay inside your step's "Files you own". Needing to touch a file another step owns
+  is normal for `cli.py` wiring — do the minimum and say so in your summary rather
+  than restructuring it.
+- Do not implement a later step's logic because it seems small. It is not yours, and
+  the agent who owns it will be working from a spec you did not read as closely.
+- Shared primitives live in one place and are imported, never re-derived: the exit
+  codes and `utcnow()` from Step 1, the validator from Step 2, `queries.py` from
+  Step 4. If two modules format a timestamp differently, date comparisons start lying.
+
+### Definition of done
+
+- Every acceptance criterion in your step, each with a real test that would fail if
+  the behaviour regressed.
+- `.venv/bin/python -m pytest tests/ -q` passes for the **whole repo**, not just your
+  files.
+- You have actually run the thing you built — the command, the server, the render —
+  and looked at the output. Do not hand back work you have only reasoned about.
+- One git commit, message ending with the `Co-Authored-By` line used by the existing
+  commits (`git log`).
+
+### Reporting back
+
+A short summary: what you built; anything in SPEC.md that was wrong or
+underspecified and how you amended it; anything you deliberately left for a later
+step.
+
+If the spec cannot be built as written, **stop and say so** rather than inventing a
+workaround. Amend it per SPEC §10 — add the change and a `D<n>` entry — because every
+later agent is reading that file, not your code. Silent divergence is the one failure
+mode this whole setup exists to prevent.
 
 ## Dependency graph
 
@@ -81,8 +124,33 @@ not worth renumbering the world over.
   global flags (`--db`, `--json`) now, and define the exit-code constants (§7) in one
   place for everyone to import.
 
+**Pitfalls specific to this step**
+- **`v_dashboard` is the highest-risk artifact in the whole project.** Every later
+  step reads it and SPEC §5.9 forbids a second definition. LEFT JOIN throughout, so a
+  job with no rating, no salary, no CV and no application still returns a row with
+  NULLs — the classic failure silently drops exactly the jobs I have just saved and
+  done nothing with. Write that test first.
+- `next_event_at` / `open_event_count` derive from SPEC D9's definition of pending.
+  Correlated subqueries are clearer here than window functions.
+- `v_latest_salary` has a **priority** rule, not a recency rule (SPEC D17). A naive
+  `ORDER BY captured_at DESC` passes casual inspection and fails the acceptance test.
+- `PRAGMA foreign_keys` does not persist in the file — it is per-connection and
+  defaults to OFF, so `connect()` must set it every time or every cascade in SPEC §5
+  silently does nothing. `journal_mode = WAL` does persist. Test *through*
+  `db.connect()`, or the cascade test passes against a connection that forgot it.
+- `data/tracker.db` resolves from the repo root, not the caller's cwd. Derive the root
+  from the module's location.
+- SQLite cannot meaningfully `ALTER` a view or a CHECK constraint, and later steps will
+  need to recreate views. Build `migrate()` around a numbered ordered sequence from
+  the start — `schema.sql` is migration 1 — not a single "create if not exists" call
+  you would have to unpick.
+- Every subcommand in SPEC §7 must exist in the argparse tree now, including the `cv`,
+  `salary`, `ingest` and `companies` groups. Later agents should fill in a function,
+  not restructure your CLI.
+
 **Acceptance**
 - `./tracker init` creates `data/tracker.db`; running it twice is a clean no-op.
+  Verify by running it twice and reading `sqlite3 data/tracker.db ".schema"`.
 - Test: every table/view in SPEC §5 exists with the right columns.
 - Test: `applications.status` CHECK rejects a bogus value.
 - Test: deleting a job cascades to its application and events.
