@@ -135,7 +135,7 @@ CREATE TABLE salary_estimates (
 -- 5.12 cv_variants — one row per (job, version); immutable once rendered (D15).
 CREATE TABLE cv_variants (
     id               INTEGER PRIMARY KEY,
-    job_id           INTEGER NOT NULL REFERENCES jobs(id),
+    job_id           INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     version          INTEGER NOT NULL,
     status           TEXT NOT NULL CHECK (status IN ('draft', 'rendered', 'sent')),
     master_hash      TEXT NOT NULL,
@@ -161,7 +161,11 @@ CREATE INDEX idx_salary_estimates_job_basis_captured ON salary_estimates(job_id,
 -- 5.9 v_latest_glassdoor — one row per company: the most recent glassdoor_ratings
 -- row by captured_at, ties broken by id.
 CREATE VIEW v_latest_glassdoor AS
-SELECT gr.*
+SELECT
+    id, company_id, overall, review_count, recommend_to_friend_pct,
+    ceo_approval_pct, work_life_balance, compensation_benefits, culture_values,
+    diversity_inclusion, career_opportunities, senior_management, source_url,
+    match_confidence, captured_at
 FROM (
     SELECT
         gr.*,

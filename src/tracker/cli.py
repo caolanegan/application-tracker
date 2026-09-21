@@ -16,9 +16,9 @@ from tracker import EXIT_ERROR, EXIT_OK
 from tracker.db import DEFAULT_DB_PATH, connect, migrate
 
 
-def _not_implemented(command: str) -> Callable[[argparse.Namespace], int]:
+def _not_implemented(command: str, step: int) -> Callable[[argparse.Namespace], int]:
     def handler(args: argparse.Namespace) -> int:
-        print(f"{command}: not implemented yet", file=sys.stderr)
+        print(f"{command}: not implemented yet (Step {step})", file=sys.stderr)
         return EXIT_ERROR
 
     return handler
@@ -123,12 +123,12 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser.set_defaults(
         func=cmd_ingest,
         ingest_handlers={
-            "linkedin": _not_implemented("ingest linkedin"),
-            "glassdoor": _not_implemented("ingest glassdoor"),
-            "descriptions": _not_implemented("ingest descriptions"),
-            "salary": _not_implemented("ingest salary"),
+            "linkedin": _not_implemented("ingest linkedin", step=2),
+            "glassdoor": _not_implemented("ingest glassdoor", step=3),
+            "descriptions": _not_implemented("ingest descriptions", step=12),
+            "salary": _not_implemented("ingest salary", step=10),
         },
-        ingest_all_handler=_not_implemented("ingest --all"),
+        ingest_all_handler=_not_implemented("ingest --all", step=2),
     )
 
     # companies pending-glassdoor|list|merge
@@ -143,12 +143,12 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[global_flags],
     )
     pending_parser.add_argument("--stale-after-days", type=int, default=30)
-    pending_parser.set_defaults(func=_not_implemented("companies pending-glassdoor"))
+    pending_parser.set_defaults(func=_not_implemented("companies pending-glassdoor", step=3))
 
     list_parser = companies_sub.add_parser(
         "list", help="list companies", parents=[global_flags]
     )
-    list_parser.set_defaults(func=_not_implemented("companies list"))
+    list_parser.set_defaults(func=_not_implemented("companies list", step=3))
 
     merge_parser = companies_sub.add_parser(
         "merge", help="merge two company records", parents=[global_flags]
@@ -156,7 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
     merge_parser.add_argument("keep_id", type=int)
     merge_parser.add_argument("drop_id", type=int)
     merge_parser.add_argument("--yes", action="store_true")
-    merge_parser.set_defaults(func=_not_implemented("companies merge"))
+    merge_parser.set_defaults(func=_not_implemented("companies merge", step=3))
 
     # status <job_id> <status>
     status_parser = subparsers.add_parser(
@@ -166,7 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("status")
     status_parser.add_argument("--applied-on")
     status_parser.add_argument("--note")
-    status_parser.set_defaults(func=_not_implemented("status"))
+    status_parser.set_defaults(func=_not_implemented("status", step=4))
 
     # event add
     event_parser = subparsers.add_parser(
@@ -181,7 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     event_add_parser.add_argument("--at", dest="occurs_at", required=True)
     event_add_parser.add_argument("--title")
     event_add_parser.add_argument("--notes")
-    event_add_parser.set_defaults(func=_not_implemented("event add"))
+    event_add_parser.set_defaults(func=_not_implemented("event add", step=4))
 
     # salary parse-postings|pending
     salary_parser = subparsers.add_parser(
@@ -192,12 +192,12 @@ def build_parser() -> argparse.ArgumentParser:
         "parse-postings",
         help="parse jobs.salary_text into 'posting' rows",
         parents=[global_flags],
-    ).set_defaults(func=_not_implemented("salary parse-postings"))
+    ).set_defaults(func=_not_implemented("salary parse-postings", step=10))
     salary_sub.add_parser(
         "pending",
         help="jobs with no salary figure, for estimation",
         parents=[global_flags],
-    ).set_defaults(func=_not_implemented("salary pending"))
+    ).set_defaults(func=_not_implemented("salary pending", step=10))
 
     # cv import-master|validate-master|brief|ingest|render|list
     cv_parser = subparsers.add_parser(
@@ -209,25 +209,25 @@ def build_parser() -> argparse.ArgumentParser:
         "import-master", help="one-time .docx -> cv/master.yaml", parents=[global_flags]
     )
     cv_import_parser.add_argument("file")
-    cv_import_parser.set_defaults(func=_not_implemented("cv import-master"))
+    cv_import_parser.set_defaults(func=_not_implemented("cv import-master", step=11))
 
     cv_validate_parser = cv_sub.add_parser(
         "validate-master", help="check ids unique, schema valid", parents=[global_flags]
     )
-    cv_validate_parser.set_defaults(func=_not_implemented("cv validate-master"))
+    cv_validate_parser.set_defaults(func=_not_implemented("cv validate-master", step=11))
 
     cv_brief_parser = cv_sub.add_parser(
         "brief", help="emit the tailoring brief", parents=[global_flags]
     )
     cv_brief_parser.add_argument("job_id", type=int)
     cv_brief_parser.add_argument("--out")
-    cv_brief_parser.set_defaults(func=_not_implemented("cv brief"))
+    cv_brief_parser.set_defaults(func=_not_implemented("cv brief", step=12))
 
     cv_ingest_parser = cv_sub.add_parser(
         "ingest", help="store a tailored variant", parents=[global_flags]
     )
     cv_ingest_parser.add_argument("file")
-    cv_ingest_parser.set_defaults(func=_not_implemented("cv ingest"))
+    cv_ingest_parser.set_defaults(func=_not_implemented("cv ingest", step=12))
 
     cv_render_parser = cv_sub.add_parser(
         "render", help="render a variant to docx/pdf", parents=[global_flags]
@@ -235,13 +235,13 @@ def build_parser() -> argparse.ArgumentParser:
     cv_render_parser.add_argument("job_id", type=int)
     cv_render_parser.add_argument("--version", type=int)
     cv_render_parser.add_argument("--formats", default="docx,pdf")
-    cv_render_parser.set_defaults(func=_not_implemented("cv render"))
+    cv_render_parser.set_defaults(func=_not_implemented("cv render", step=11))
 
     cv_list_parser = cv_sub.add_parser(
         "list", help="list CV variants", parents=[global_flags]
     )
     cv_list_parser.add_argument("job_id", type=int, nargs="?")
-    cv_list_parser.set_defaults(func=_not_implemented("cv list"))
+    cv_list_parser.set_defaults(func=_not_implemented("cv list", step=12))
 
     # export csv|xlsx
     export_parser = subparsers.add_parser(
@@ -250,10 +250,10 @@ def build_parser() -> argparse.ArgumentParser:
     export_sub = export_parser.add_subparsers(dest="export_cmd")
     export_csv_parser = export_sub.add_parser("csv", parents=[global_flags])
     export_csv_parser.add_argument("--out")
-    export_csv_parser.set_defaults(func=_not_implemented("export csv"))
+    export_csv_parser.set_defaults(func=_not_implemented("export csv", step=5))
     export_xlsx_parser = export_sub.add_parser("xlsx", parents=[global_flags])
     export_xlsx_parser.add_argument("--out")
-    export_xlsx_parser.set_defaults(func=_not_implemented("export xlsx"))
+    export_xlsx_parser.set_defaults(func=_not_implemented("export xlsx", step=5))
 
     # serve
     serve_parser = subparsers.add_parser(
@@ -261,13 +261,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve_parser.add_argument("--port", type=int, default=8765)
     serve_parser.add_argument("--no-open", action="store_true")
-    serve_parser.set_defaults(func=_not_implemented("serve"))
+    serve_parser.set_defaults(func=_not_implemented("serve", step=6))
 
     # stats
     stats_parser = subparsers.add_parser(
         "stats", help="summary counts", parents=[global_flags]
     )
-    stats_parser.set_defaults(func=_not_implemented("stats"))
+    stats_parser.set_defaults(func=_not_implemented("stats", step=4))
 
     return parser
 

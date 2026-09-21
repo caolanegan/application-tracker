@@ -48,6 +48,44 @@ EXPECTED_TABLES = {
 
 EXPECTED_VIEWS = {"v_latest_glassdoor", "v_latest_salary", "v_dashboard"}
 
+EXPECTED_VIEW_COLUMNS = {
+    "v_latest_glassdoor": {
+        "id", "company_id", "overall", "review_count", "recommend_to_friend_pct",
+        "ceo_approval_pct", "work_life_balance", "compensation_benefits",
+        "culture_values", "diversity_inclusion", "career_opportunities",
+        "senior_management", "source_url", "match_confidence", "captured_at",
+    },
+    "v_latest_salary": {
+        "id", "job_id", "basis", "currency", "period", "min_amount", "max_amount",
+        "annualized_min", "annualized_max", "confidence", "sources_json",
+        "method_notes", "captured_at",
+    },
+    "v_dashboard": {
+        "job_id", "linkedin_job_id", "title", "company_id", "company_name",
+        "location", "workplace_type", "employment_type", "salary_text",
+        "posted_text", "job_url", "easy_apply", "description_snippet",
+        "first_seen_at", "last_seen_at", "is_saved",
+        "glassdoor_url", "glassdoor_company_id", "glassdoor_lookup_state",
+        "glassdoor_overall", "glassdoor_review_count",
+        "glassdoor_recommend_to_friend_pct", "glassdoor_ceo_approval_pct",
+        "glassdoor_work_life_balance", "glassdoor_compensation_benefits",
+        "glassdoor_culture_values", "glassdoor_diversity_inclusion",
+        "glassdoor_career_opportunities", "glassdoor_senior_management",
+        "glassdoor_match_confidence", "glassdoor_captured_at",
+        "application_id", "status", "applied_on", "apply_channel", "priority",
+        "next_action", "next_action_on", "notes",
+        "application_created_at", "application_updated_at",
+        "next_event_at", "next_event_title", "open_event_count",
+        "salary_basis", "salary_currency", "salary_period",
+        "salary_min_amount", "salary_max_amount",
+        "salary_annualized_min", "salary_annualized_max",
+        "salary_confidence", "salary_sources_json", "salary_method_notes",
+        "salary_captured_at",
+        "cv_version", "cv_status", "cv_rendered_at",
+        "has_job_description",
+    },
+}
+
 
 @pytest.fixture
 def conn(tmp_path):
@@ -125,6 +163,15 @@ def test_all_views_exist(conn):
     assert EXPECTED_VIEWS.issubset(names)
 
 
+def test_views_have_expected_columns(conn):
+    # v_dashboard is read by six later steps and SPEC §5.9 forbids a second
+    # definition of it, so a renamed or dropped column here should fail loudly
+    # rather than surface as a later step's exporter/UI bug.
+    for view, expected_columns in EXPECTED_VIEW_COLUMNS.items():
+        actual = _columns(conn, view)
+        assert actual == expected_columns, f"{view}: {actual} != {expected_columns}"
+
+
 def test_init_is_idempotent(tmp_path):
     path = tmp_path / "tracker.db"
     conn1 = db.connect(path)
@@ -156,6 +203,21 @@ def test_deleting_a_job_cascades_to_application_and_events(conn):
         """,
         (application_id, db.utcnow(), db.utcnow()),
     )
+    conn.execute(
+        """
+        INSERT INTO job_descriptions (job_id, full_text, content_hash, captured_at)
+        VALUES (?, 'About the role...', 'sha256:deadbeef', ?)
+        """,
+        (job_id, db.utcnow()),
+    )
+    insert_salary(conn, job_id, basis="posting")
+    conn.execute(
+        """
+        INSERT INTO cv_variants (job_id, version, status, master_hash, content_json, created_at)
+        VALUES (?, 1, 'draft', 'sha256:abc', '{}', ?)
+        """,
+        (job_id, db.utcnow()),
+    )
     conn.commit()
 
     conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
@@ -165,9 +227,18 @@ def test_deleting_a_job_cascades_to_application_and_events(conn):
     assert conn.execute(
         "SELECT * FROM application_events WHERE application_id = ?", (application_id,)
     ).fetchone() is None
+    assert conn.execute(
+        "SELECT * FROM job_descriptions WHERE job_id = ?", (job_id,)
+    ).fetchone() is None
+    assert conn.execute(
+        "SELECT * FROM salary_estimates WHERE job_id = ?", (job_id,)
+    ).fetchone() is None
+    assert conn.execute(
+        "SELECT * FROM cv_variants WHERE job_id = ?", (job_id,)
+    ).fetchone() is None
 
 
-def test_deleting_a_job_without_foreign_keys_on_would_not_cascade(tmp_path):
+def test_connect_enables_foreign_keys(tmp_path):
     # Guards against a connect() that forgets PRAGMA foreign_keys = ON: this
     # test goes through db.connect() itself, not a manually configured
     # connection, so a regression there is caught here.

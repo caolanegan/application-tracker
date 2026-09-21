@@ -38,6 +38,11 @@ agent prompt. Read them once, at the start.
   codes and `utcnow()` from Step 1, the validator from Step 2, `queries.py` from
   Step 4. If two modules format a timestamp differently, date comparisons start lying.
 
+  **What Step 1 leaves you:**
+  - `from tracker import EXIT_OK, EXIT_ERROR, EXIT_VALIDATION, EXIT_NOT_FOUND`
+  - `from tracker.db import connect, migrate, utcnow, DEFAULT_DB_PATH`
+  - Root `conftest.py` already puts `src/` on `sys.path` — tests need no path setup.
+
 ### Definition of done
 
 - Every acceptance criterion in your step, each with a real test that would fail if
